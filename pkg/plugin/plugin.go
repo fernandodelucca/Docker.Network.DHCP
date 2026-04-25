@@ -12,7 +12,7 @@ import (
 	"github.com/mitchellh/mapstructure"
 	"github.com/vishvananda/netlink"
 
-	"github.com/devplayer0/docker-net-dhcp/pkg/util"
+	"github.com/fernandodelucca/Docker.Network.DHCP/pkg/util"
 )
 
 // DriverName is the name of the Docker Network Driver
