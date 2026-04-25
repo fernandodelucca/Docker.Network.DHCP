@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	dTypes "github.com/docker/docker/api/types"
+	dNetwork "github.com/docker/docker/api/types/network"
 	docker "github.com/docker/docker/client"
 	"github.com/gorilla/handlers"
 	"github.com/mitchellh/mapstructure"
@@ -32,7 +32,10 @@ const (
 
 const defaultLeaseTimeout = 10 * time.Second
 
-var driverRegexp = regexp.MustCompile(`(^|/)docker-net-dhcp:.+$`)
+// Match both the current name (docker-network-dhcp) and the historical
+// short form (docker-net-dhcp) so existing networks created before the
+// rename are still recognised by Restore and the bridge-conflict check.
+var driverRegexp = regexp.MustCompile(`(^|/)docker-net(work)?-dhcp:.+$`)
 
 // IsDHCPPlugin checks if a Docker network driver is an instance of this plugin
 func IsDHCPPlugin(driver string) bool {
@@ -160,7 +163,7 @@ func (p *Plugin) Restore(ctx context.Context) error {
 		return fmt.Errorf("docker daemon never became ready: %w", err)
 	}
 
-	nets, err := p.docker.NetworkList(ctx, dTypes.NetworkListOptions{})
+	nets, err := p.docker.NetworkList(ctx, dNetwork.ListOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to list networks: %w", err)
 	}
@@ -178,7 +181,7 @@ func (p *Plugin) Restore(ctx context.Context) error {
 		}
 
 		// NetworkInspect returns the per-endpoint container map keyed by container ID
-		netInfo, err := p.docker.NetworkInspect(ctx, n.ID, dTypes.NetworkInspectOptions{})
+		netInfo, err := p.docker.NetworkInspect(ctx, n.ID, dNetwork.InspectOptions{})
 		if err != nil {
 			log.WithError(err).WithField("network", n.Name).Warn("Restore: failed to inspect network, skipping")
 			continue
@@ -205,7 +208,7 @@ func (p *Plugin) Restore(ctx context.Context) error {
 }
 
 // restoreEndpoint rehydrates a single endpoint's persistent DHCP client.
-func (p *Plugin) restoreEndpoint(ctx context.Context, networkID, ctrID string, epInfo dTypes.EndpointResource, opts DHCPNetworkOptions) error {
+func (p *Plugin) restoreEndpoint(ctx context.Context, networkID, ctrID string, epInfo dNetwork.EndpointResource, opts DHCPNetworkOptions) error {
 	// If a fresh Join has already registered this endpoint while Restore was
 	// running, leave it alone — starting a second udhcpc on the same interface
 	// would create duplicate lease traffic.
@@ -320,7 +323,7 @@ func (p *Plugin) restoreEndpoint(ctx context.Context, networkID, ctrID string, e
 // findEndpointLink locates the container-side interface inside the given netns.
 // In bridge mode it uses the host-side veth pair name to find the peer index.
 // In macvlan/ipvlan mode it matches by the endpoint's MAC address.
-func (p *Plugin) findEndpointLink(netHandle *netlink.Handle, epInfo dTypes.EndpointResource, opts DHCPNetworkOptions) (netlink.Link, int, error) {
+func (p *Plugin) findEndpointLink(netHandle *netlink.Handle, epInfo dNetwork.EndpointResource, opts DHCPNetworkOptions) (netlink.Link, int, error) {
 	if opts.NetMode() == NetworkModeBridge {
 		hostName, _ := vethPairNames(epInfo.EndpointID)
 		hostLink, err := netlink.LinkByName(hostName)

@@ -1,4 +1,5 @@
-PLUGIN_NAME = ghcr.io/fernandodelucca/docker-network-dhcp
+PLUGIN_NAME ?= ghcr.io/fernandodelucca/docker-network-dhcp
+PLUGIN_TAG ?= latest
 PLATFORMS ?= linux/amd64,linux/arm64/v8
 
 SOURCES = $(shell find pkg/ cmd/ -name '*.go')
