@@ -11,7 +11,6 @@ import (
 	"github.com/mitchellh/mapstructure"
 	log "github.com/sirupsen/logrus"
 	"github.com/vishvananda/netlink"
-	"golang.org/x/sys/unix"
 
 	"github.com/fernandodelucca/docker-network-dhcp/pkg/udhcpc"
 	"github.com/fernandodelucca/docker-network-dhcp/pkg/util"
@@ -70,11 +69,11 @@ func (p *Plugin) CreateNetwork(r CreateNetworkRequest) error {
 		}
 
 		if !opts.IgnoreConflicts {
-			v4Addrs, err := netlink.AddrList(link, unix.AF_INET)
+			v4Addrs, err := netlink.AddrList(link, netlinkFamilyV4)
 			if err != nil {
 				return fmt.Errorf("failed to retrieve IPv4 addresses for %v: %w", opts.Bridge, err)
 			}
-			v6Addrs, err := netlink.AddrList(link, unix.AF_INET6)
+			v6Addrs, err := netlink.AddrList(link, netlinkFamilyV6)
 			if err != nil {
 				return fmt.Errorf("failed to retrieve IPv6 addresses for %v: %w", opts.Bridge, err)
 			}
@@ -511,14 +510,14 @@ func (p *Plugin) DeleteEndpoint(ctx context.Context, r DeleteEndpointRequest) er
 }
 
 func (p *Plugin) addRoutes(opts *DHCPNetworkOptions, v6 bool, bridge netlink.Link, r JoinRequest, hint joinHint, res *JoinResponse) error {
-	family := unix.AF_INET
+	family := netlinkFamilyV4
 	if v6 {
-		family = unix.AF_INET6
+		family = netlinkFamilyV6
 	}
 
 	routes, err := netlink.RouteListFiltered(family, &netlink.Route{
 		LinkIndex: bridge.Attrs().Index,
-		Type:      unix.RTN_UNICAST,
+		Type:      netlinkRTN_UNICAST,
 	}, netlink.RT_FILTER_OIF|netlink.RT_FILTER_TYPE)
 	if err != nil {
 		return fmt.Errorf("failed to list routes: %w", err)
@@ -533,7 +532,7 @@ func (p *Plugin) addRoutes(opts *DHCPNetworkOptions, v6 bool, bridge netlink.Lin
 		if route.Dst == nil {
 			// Default route
 			switch family {
-			case unix.AF_INET:
+			case netlinkFamilyV4:
 				if res.Gateway == "" {
 					res.Gateway = route.Gw.String()
 					log.
@@ -541,7 +540,7 @@ func (p *Plugin) addRoutes(opts *DHCPNetworkOptions, v6 bool, bridge netlink.Lin
 						WithField("gateway", res.Gateway).
 						Info("[Join] Setting IPv4 gateway retrieved from bridge interface on host routing table")
 				}
-			case unix.AF_INET6:
+			case netlinkFamilyV6:
 				if res.GatewayIPv6 == "" {
 					res.GatewayIPv6 = route.Gw.String()
 					log.
@@ -559,9 +558,9 @@ func (p *Plugin) addRoutes(opts *DHCPNetworkOptions, v6 bool, bridge netlink.Lin
 			continue
 		}
 
-		if route.Protocol == unix.RTPROT_KERNEL ||
-			(family == unix.AF_INET && route.Dst.Contains(hint.IPv4.IP)) ||
-			(family == unix.AF_INET6 && route.Dst.Contains(hint.IPv6.IP)) {
+		if route.Protocol == netlinkRTPROT_KERNEL ||
+			(family == netlinkFamilyV4 && route.Dst.Contains(hint.IPv4.IP)) ||
+			(family == netlinkFamilyV6 && route.Dst.Contains(hint.IPv6.IP)) {
 			// Make sure to leave out the default on-link route created automatically for the IP(s) acquired by DHCP
 			continue
 		}

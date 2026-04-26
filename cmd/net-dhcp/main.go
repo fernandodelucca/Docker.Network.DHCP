@@ -7,10 +7,10 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"syscall"
 	"time"
 
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/sys/unix"
 
 	"github.com/fernandodelucca/docker-network-dhcp/pkg/plugin"
 )
@@ -73,7 +73,7 @@ func main() {
 	p.StartRestore()
 
 	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, unix.SIGINT, unix.SIGTERM)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
 		defer func() {

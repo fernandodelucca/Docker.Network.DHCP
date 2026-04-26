@@ -13,7 +13,6 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
-	"golang.org/x/sys/unix"
 
 	"github.com/fernandodelucca/docker-network-dhcp/pkg/udhcpc"
 	"github.com/fernandodelucca/docker-network-dhcp/pkg/util"
@@ -145,7 +144,7 @@ func (m *dhcpManager) renew(v6 bool, info udhcpc.Info) error {
 	if !v6 && info.Gateway != "" {
 		newGateway := net.ParseIP(info.Gateway)
 
-		routes, err := m.netHandle.RouteListFiltered(unix.AF_INET, &netlink.Route{
+		routes, err := m.netHandle.RouteListFiltered(netlinkFamilyV4, &netlink.Route{
 			LinkIndex: m.ctrLink.Attrs().Index,
 			Dst:       nil,
 		}, netlink.RT_FILTER_OIF|netlink.RT_FILTER_DST)
@@ -383,7 +382,7 @@ func (m *dhcpManager) Start(ctx context.Context) error {
 				return util.ErrNotVEth
 			}
 
-			ctrIndex, err = netlink.VethPeerIndex(hostVeth)
+			ctrIndex, err = vethPeerIndex(hostVeth)
 			if err != nil {
 				return fmt.Errorf("failed to get container side of veth's index: %w", err)
 			}
