@@ -380,9 +380,9 @@ type operInfo struct {
 }
 
 // EndpointOperInfo retrieves some info about an existing endpoint. Reads
-// bridge/mode from the persisted state when available, falling back to the
-// Docker API only as a last resort. This avoids a deadlock seen in the wild:
-// libnetwork holds locks while cleaning stale endpoints, blocking
+// bridge/mode from the persisted state only (no Docker API calls).
+// If state is unavailable, returns empty info. This avoids a deadlock seen
+// in the wild: libnetwork holds locks while cleaning stale endpoints, blocking
 // NetworkInspect for minutes; if we relied on it, EndpointOperInfo would hang
 // the whole cleanup loop.
 func (p *Plugin) EndpointOperInfo(ctx context.Context, r InfoRequest) (InfoResponse, error) {
@@ -391,6 +391,15 @@ func (p *Plugin) EndpointOperInfo(ctx context.Context, r InfoRequest) (InfoRespo
 	mode, bridge, err := p.endpointModeAndBridge(ctx, r.NetworkID, r.EndpointID)
 	if err != nil {
 		return res, fmt.Errorf("failed to determine endpoint mode/bridge: %w", err)
+	}
+
+	// If no state for this endpoint, return empty info (state may not be persisted yet)
+	if mode == "" {
+		log.WithFields(log.Fields{
+			"network":  r.NetworkID[:12],
+			"endpoint": r.EndpointID[:12],
+		}).Debug("EndpointOperInfo: no persisted state, returning empty info")
+		return InfoResponse{Value: make(map[string]string)}, nil
 	}
 
 	info := operInfo{Bridge: bridge}
@@ -412,26 +421,21 @@ func (p *Plugin) EndpointOperInfo(ctx context.Context, r InfoRequest) (InfoRespo
 	return res, nil
 }
 
-// endpointModeAndBridge returns the network mode and bridge for an endpoint,
-// preferring the persisted state (no API call) and falling back to the Docker
-// API. Empty strings on a missing/unparseable record so callers can decide.
+// endpointModeAndBridge returns the network mode and bridge for an endpoint from
+// persisted state. Returns empty strings if not found (caller decides on fallback).
+// Avoids Docker API calls which can deadlock during libnetwork cleanup.
 func (p *Plugin) endpointModeAndBridge(ctx context.Context, networkID, endpointID string) (string, string, error) {
 	p.mu.Lock()
 	state, ok := p.state[endpointID]
 	p.mu.Unlock()
-	if ok {
-		mode := state.Mode
-		if mode == "" {
-			mode = NetworkModeBridge
-		}
-		return mode, state.Bridge, nil
+	if !ok {
+		return "", "", nil
 	}
-
-	opts, err := p.netOptions(ctx, networkID)
-	if err != nil {
-		return "", "", err
+	mode := state.Mode
+	if mode == "" {
+		mode = NetworkModeBridge
 	}
-	return opts.NetMode(), opts.Bridge, nil
+	return mode, state.Bridge, nil
 }
 
 // DeleteEndpoint cleans up the endpoint interface. Bridge mode: delete the
@@ -639,7 +643,15 @@ func (p *Plugin) Join(ctx context.Context, r JoinRequest) (JoinResponse, error) 
 
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), p.awaitTimeout)
+		p.mu.Lock()
+		p.cancelJoin[r.EndpointID] = cancel
+		p.mu.Unlock()
 		defer cancel()
+		defer func() {
+			p.mu.Lock()
+			delete(p.cancelJoin, r.EndpointID)
+			p.mu.Unlock()
+		}()
 
 		m := newDHCPManager(p.docker, r, opts)
 		m.LastIP = hint.IPv4
@@ -656,6 +668,17 @@ func (p *Plugin) Join(ctx context.Context, r JoinRequest) (JoinResponse, error) 
 		}
 
 		p.mu.Lock()
+		// Check if Leave was called while we were starting
+		if _, left := p.leftEndpoints[r.EndpointID]; left {
+			delete(p.leftEndpoints, r.EndpointID)
+			p.mu.Unlock()
+			_ = m.Stop()
+			log.WithFields(log.Fields{
+				"network":  r.NetworkID[:12],
+				"endpoint": r.EndpointID[:12],
+			}).Debug("Join completed but endpoint was left during startup; cleaned up manager")
+			return
+		}
 		p.persistentDHCP[r.EndpointID] = m
 		p.mu.Unlock()
 
@@ -696,14 +719,26 @@ func (p *Plugin) Leave(ctx context.Context, r LeaveRequest) error {
 	manager, ok := p.persistentDHCP[r.EndpointID]
 	if ok {
 		delete(p.persistentDHCP, r.EndpointID)
+	} else {
+		// Join goroutine may be in-flight — cancel it and mark as left
+		if cancel, pending := p.cancelJoin[r.EndpointID]; pending {
+			cancel()
+			log.WithFields(log.Fields{
+				"network":  r.NetworkID[:12],
+				"endpoint": r.EndpointID[:12],
+			}).Debug("Leave: cancelled in-flight Join goroutine")
+		}
+		p.leftEndpoints[r.EndpointID] = struct{}{}
 	}
 	p.mu.Unlock()
 	if !ok {
-		log.WithFields(log.Fields{
-			"network":  r.NetworkID[:12],
-			"endpoint": r.EndpointID[:12],
-		}).Warn("Leave called for endpoint without persistent DHCP state — treating as no-op")
-		return nil
+		if manager == nil {
+			log.WithFields(log.Fields{
+				"network":  r.NetworkID[:12],
+				"endpoint": r.EndpointID[:12],
+			}).Warn("Leave called for endpoint without persistent DHCP state — treating as no-op")
+			return nil
+		}
 	}
 
 	if err := manager.Stop(); err != nil {
