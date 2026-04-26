@@ -103,7 +103,12 @@ type Plugin struct {
 	// Keyed by EndpointID. Rewritten atomically whenever Join/Leave runs so
 	// that a restart can rebuild persistentDHCP without depending on the
 	// Docker API being responsive (which can deadlock during plugin loading).
-	state map[string]endpointState
+	state         map[string]endpointState
+	cancelJoin    map[string]context.CancelFunc
+	leftEndpoints map[string]struct{}
+
+	restoreCancel context.CancelFunc
+	restoreWg     sync.WaitGroup
 }
 
 // NewPlugin creates a new Plugin
@@ -138,6 +143,8 @@ func NewPlugin(awaitTimeout time.Duration) (*Plugin, error) {
 		joinHints:      make(map[string]joinHint),
 		persistentDHCP: make(map[string]*dhcpManager),
 		state:          persisted,
+		cancelJoin:     make(map[string]context.CancelFunc),
+		leftEndpoints:  make(map[string]struct{}),
 	}
 
 	mux := http.NewServeMux()
@@ -410,14 +417,58 @@ func (p *Plugin) Listen(bindSock string) error {
 	return p.server.Serve(l)
 }
 
-// Close stops the plugin server
+// StartRestore launches the Restore goroutine with a 5-minute deadline and 10-second boot delay.
+// It holds the cancel func internally so Close() can cancel in-flight restore operations.
+func (p *Plugin) StartRestore() {
+	p.restoreWg.Add(1)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	p.mu.Lock()
+	p.restoreCancel = cancel
+	p.mu.Unlock()
+	go func() {
+		defer p.restoreWg.Done()
+		defer cancel()
+		defer func() {
+			p.mu.Lock()
+			p.restoreCancel = nil
+			p.mu.Unlock()
+		}()
+		time.Sleep(10 * time.Second)
+		if err := p.Restore(ctx); err != nil {
+			log.WithError(err).Error("Restore phase reported errors")
+		}
+	}()
+}
+
+// Close stops the plugin server, cancels in-flight restore, and stops all DHCP managers
 func (p *Plugin) Close() error {
-	if err := p.docker.Close(); err != nil {
-		return fmt.Errorf("failed to close docker client: %w", err)
+	// 1. Cancel restore in-flight and wait for it to finish
+	p.mu.Lock()
+	if p.restoreCancel != nil {
+		p.restoreCancel()
+	}
+	p.mu.Unlock()
+	p.restoreWg.Wait()
+
+	// 2. Stop all active DHCP managers
+	p.mu.Lock()
+	managers := make([]*dhcpManager, 0, len(p.persistentDHCP))
+	for _, m := range p.persistentDHCP {
+		managers = append(managers, m)
+	}
+	p.mu.Unlock()
+	for _, m := range managers {
+		if err := m.Stop(); err != nil {
+			log.WithError(err).Warn("Error stopping DHCP manager during shutdown")
+		}
 	}
 
+	// 3. Close HTTP server first, then Docker client
 	if err := p.server.Close(); err != nil {
 		return fmt.Errorf("failed to close http server: %w", err)
+	}
+	if err := p.docker.Close(); err != nil {
+		return fmt.Errorf("failed to close docker client: %w", err)
 	}
 
 	return nil
