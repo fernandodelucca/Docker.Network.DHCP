@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	docker "github.com/docker/docker/client"
+	docker "github.com/moby/moby/client"
 	"github.com/gorilla/handlers"
 	"github.com/mitchellh/mapstructure"
 	log "github.com/sirupsen/logrus"
@@ -135,16 +135,14 @@ func NewPlugin(awaitTimeout time.Duration) (*Plugin, error) {
 	}
 
 	// Log Docker daemon info including negotiated API version
-	serverInfo, err := client.ServerVersion(context.Background())
+	serverInfo, err := client.ServerVersion(context.Background(), docker.ServerVersionOptions{})
 	if err == nil {
 		log.WithFields(log.Fields{
-			"api_version":     serverInfo.APIVersion,
-			"os":              serverInfo.Os,
-			"arch":            serverInfo.Arch,
-			"docker_version":  serverInfo.Version,
-			"kernel_version":  serverInfo.KernelVersion,
-			"experimental":    serverInfo.Experimental,
-			"build_time":      serverInfo.BuildTime,
+			"api_version":    serverInfo.APIVersion,
+			"os":             serverInfo.Os,
+			"arch":           serverInfo.Arch,
+			"docker_version": serverInfo.Version,
+			"experimental":   serverInfo.Experimental,
 		}).Info("Connected to Docker daemon with API version negotiation")
 	} else {
 		log.WithError(err).Warn("Failed to fetch Docker daemon info (connection may succeed later)")

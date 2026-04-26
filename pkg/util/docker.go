@@ -4,8 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/client"
+	"github.com/moby/moby/client"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -13,16 +12,16 @@ const (
 	OptionsKeyGeneric = "com.docker.network.generic"
 )
 
-func AwaitContainerInspect(ctx context.Context, docker *client.Client, id string, interval time.Duration) (types.ContainerJSON, error) {
+func AwaitContainerInspect(ctx context.Context, docker *client.Client, id string, interval time.Duration) (client.ContainerInspectResult, error) {
 	var err error
-	ctrChan := make(chan types.ContainerJSON)
+	ctrChan := make(chan client.ContainerInspectResult)
 	go func() {
 		for {
 			if ctx.Err() != nil {
 				return
 			}
-			var ctr types.ContainerJSON
-			ctr, err = docker.ContainerInspect(ctx, id)
+			var ctr client.ContainerInspectResult
+			ctr, err = docker.ContainerInspect(ctx, id, client.ContainerInspectOptions{})
 			if err == nil {
 				ctrChan <- ctr
 				return
@@ -36,10 +35,10 @@ func AwaitContainerInspect(ctx context.Context, docker *client.Client, id string
 		}
 	}()
 
-	var dummy types.ContainerJSON
+	var dummy client.ContainerInspectResult
 	select {
-	case link := <-ctrChan:
-		return link, nil
+	case ctr := <-ctrChan:
+		return ctr, nil
 	case <-ctx.Done():
 		if err != nil {
 			log.WithError(err).WithField("id", id).Error("Failed to await container by ID")

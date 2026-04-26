@@ -8,8 +8,7 @@ import (
 	"sync"
 	"time"
 
-	dNetwork "github.com/docker/docker/api/types/network"
-	docker "github.com/docker/docker/client"
+	docker "github.com/moby/moby/client"
 	log "github.com/sirupsen/logrus"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
@@ -316,12 +315,12 @@ func (m *dhcpManager) Start(ctx context.Context) error {
 	var ctrID string
 	log.WithFields(m.logFields(false)).Trace("Awaiting container ID on network")
 	if err := util.AwaitCondition(ctx, func() (bool, error) {
-		dockerNet, err := m.docker.NetworkInspect(ctx, m.joinReq.NetworkID, dNetwork.InspectOptions{})
+		dockerNetResult, err := m.docker.NetworkInspect(ctx, m.joinReq.NetworkID, docker.NetworkInspectOptions{})
 		if err != nil {
 			return false, fmt.Errorf("failed to get Docker network info: %w", err)
 		}
 
-		for id, info := range dockerNet.Containers {
+		for id, info := range dockerNetResult.Network.Containers {
 			if info.EndpointID == m.joinReq.EndpointID {
 				ctrID = id
 				break
@@ -343,11 +342,11 @@ func (m *dhcpManager) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to get Docker container info: %w", err)
 	}
-	log.WithFields(m.logFields(false)).WithField("pid", ctr.State.Pid).Debug("Container PID obtained")
+	log.WithFields(m.logFields(false)).WithField("pid", ctr.Container.State.Pid).Debug("Container PID obtained")
 
 	// Using the "sandbox key" directly causes issues on some platforms
-	m.nsPath = fmt.Sprintf("/proc/%v/ns/net", ctr.State.Pid)
-	m.hostname = ctr.Config.Hostname
+	m.nsPath = fmt.Sprintf("/proc/%v/ns/net", ctr.Container.State.Pid)
+	m.hostname = ctr.Container.Config.Hostname
 	log.WithFields(m.logFields(false)).WithFields(log.Fields{
 		"ns_path":  m.nsPath,
 		"hostname": m.hostname,

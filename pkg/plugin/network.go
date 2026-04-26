@@ -7,7 +7,7 @@ import (
 	"net"
 	"time"
 
-	dNetwork "github.com/docker/docker/api/types/network"
+	docker "github.com/moby/moby/client"
 	"github.com/mitchellh/mapstructure"
 	log "github.com/sirupsen/logrus"
 	"github.com/vishvananda/netlink"
@@ -79,13 +79,13 @@ func (p *Plugin) CreateNetwork(r CreateNetworkRequest) error {
 			}
 			bridgeAddrs := append(v4Addrs, v6Addrs...)
 
-			nets, err := p.docker.NetworkList(context.Background(), dNetwork.ListOptions{})
+			netsResult, err := p.docker.NetworkList(context.Background(), docker.NetworkListOptions{})
 			if err != nil {
 				return fmt.Errorf("failed to retrieve list of networks from Docker: %w", err)
 			}
 
 			// Make sure the addresses on this bridge aren't used by another network
-			for _, n := range nets {
+			for _, n := range netsResult.Items {
 				if IsDHCPPlugin(n.Driver) {
 					otherOpts, err := decodeOpts(n.Options)
 					if err != nil {
@@ -103,7 +103,7 @@ func (p *Plugin) CreateNetwork(r CreateNetworkRequest) error {
 				}
 
 				for _, c := range n.IPAM.Config {
-					_, dockerCIDR, err := net.ParseCIDR(c.Subnet)
+					_, dockerCIDR, err := net.ParseCIDR(c.Subnet.String())
 					if err != nil {
 						return fmt.Errorf("failed to parse subnet %v on Docker network %v: %w", c.Subnet, n.ID, err)
 					}
@@ -145,12 +145,12 @@ func vethPairNames(id string) (string, string) {
 func (p *Plugin) netOptions(ctx context.Context, id string) (DHCPNetworkOptions, error) {
 	dummy := DHCPNetworkOptions{}
 
-	n, err := p.docker.NetworkInspect(ctx, id, dNetwork.InspectOptions{})
+	nResult, err := p.docker.NetworkInspect(ctx, id, docker.NetworkInspectOptions{})
 	if err != nil {
 		return dummy, fmt.Errorf("failed to get info from Docker: %w", err)
 	}
 
-	opts, err := decodeOpts(n.Options)
+	opts, err := decodeOpts(nResult.Network.Options)
 	if err != nil {
 		return dummy, fmt.Errorf("failed to parse options: %w", err)
 	}
