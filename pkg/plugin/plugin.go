@@ -526,6 +526,11 @@ func vethPeerIndex(veth *netlink.Veth) (int, error) {
 	return 0, fmt.Errorf("peer veth not found for index %d", attrs.Index)
 }
 
+// Client returns the Docker client for readiness probing
+func (p *Plugin) Client() *docker.Client {
+	return p.docker
+}
+
 // Listen starts the plugin server
 func (p *Plugin) Listen(bindSock string) error {
 	l, err := net.Listen("unix", bindSock)

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	docker "github.com/moby/moby/client"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/fernandodelucca/docker-network-dhcp/pkg/plugin"
@@ -20,6 +22,27 @@ var (
 	logFile  = flag.String("logfile", "", "log file")
 	bindSock = flag.String("sock", "/run/docker/plugins/net-dhcp.sock", "bind unix socket")
 )
+
+// waitForDockerReady blocks until dockerd is ready to accept API calls, with 500ms retry intervals up to 30 seconds
+func waitForDockerReady(ctx context.Context, client *docker.Client) error {
+	deadline := time.Now().Add(30 * time.Second)
+	interval := 500 * time.Millisecond
+	for {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("docker daemon not ready after 30 seconds")
+		}
+		_, err := client.Ping(ctx, docker.PingOptions{})
+		if err == nil {
+			log.Debug("Docker daemon is ready")
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(interval):
+		}
+	}
+}
 
 func main() {
 	flag.Parse()
@@ -71,6 +94,13 @@ func main() {
 	// finishes "Loading containers" — Restore handles its own readiness wait.
 	// The 10s delay and 5-minute timeout are documented in Plugin.StartRestore().
 	p.StartRestore()
+
+	// Wait for Docker daemon to be ready before listening for connections.
+	// This ensures dockerd won't see the plugin socket before it can handle requests.
+	if err := waitForDockerReady(context.Background(), p.Client()); err != nil {
+		log.WithError(err).Fatal("Docker daemon did not become ready in time")
+	}
+	log.Info("Docker daemon is ready — plugin can now handle requests")
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
