@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
+	"net/http"
 	"os"
 	"os/signal"
 	"time"
@@ -74,7 +76,9 @@ func main() {
 
 	go func() {
 		log.Info("Starting server...")
-		if err := p.Listen(*bindSock); err != nil {
+		// http.ErrServerClosed is the expected return when Close() is called
+		// during graceful shutdown — don't escalate that to Fatal.
+		if err := p.Listen(*bindSock); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.WithError(err).Fatal("Failed to start plugin")
 		}
 	}()

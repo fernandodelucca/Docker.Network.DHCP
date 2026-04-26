@@ -104,9 +104,13 @@ type Plugin struct {
 
 // NewPlugin creates a new Plugin
 func NewPlugin(awaitTimeout time.Duration) (*Plugin, error) {
+	// 30s is generous on purpose: during a `dockerd` restart the API socket may
+	// be slow to respond for several seconds. The previous 2s default caused
+	// netOptions/Leave/EndpointOperInfo to fail right after restart with
+	// "context deadline exceeded".
 	client, err := docker.NewClientWithOpts(
 		docker.WithAPIVersionNegotiation(),
-		docker.WithTimeout(2*time.Second),
+		docker.WithTimeout(30*time.Second),
 		docker.FromEnv)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create docker client: %w", err)

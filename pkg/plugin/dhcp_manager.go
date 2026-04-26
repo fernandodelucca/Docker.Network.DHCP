@@ -38,9 +38,14 @@ type dhcpManager struct {
 	netHandle *netlink.Handle
 	ctrLink   netlink.Link
 
-	// deconfigured is set when udhcpc emits a deconfig event without a fresh
-	// lease. We keep the existing IP in place ("soft handover") and apply the
-	// next bound/renew lease as a replacement to avoid breaking copied routes.
+	// deconfigured is set when udhcpc emits a deconfig event after the lease
+	// was already in place. We keep the existing IP ("soft handover") and apply
+	// the next bound/renew lease as a replacement to avoid breaking copied routes.
+	// primed becomes true on the first bound/renew so that the deconfig udhcpc
+	// always emits at startup (before DHCPDISCOVER) is ignored — at that point
+	// the IP set by CreateEndpoint is the source of truth, not a stale lease.
+	primed         bool
+	primedV6       bool
 	deconfigured   bool
 	deconfiguredV6 bool
 
@@ -193,10 +198,23 @@ func (m *dhcpManager) setupClient(v6 bool) (chan error, error) {
 			case event := <-events:
 				switch event.Type {
 				case "deconfig":
-					// Soft handover: don't delete the IP yet. Deleting would also
-					// drop routes copied from the host bridge, breaking connectivity.
-					// Mark the manager as deconfigured so the next bound/renew
-					// performs an AddrReplace as a single atomic transition.
+					// udhcpc always emits deconfig once at startup (before
+					// DHCPDISCOVER). At that point we haven't seen bound yet —
+					// primed is false — and the current IP is what CreateEndpoint
+					// installed, not a stale lease. Skip the soft-handover dance
+					// in that case to avoid a no-op AddrReplace at boot.
+					primed := m.primed
+					if v6 {
+						primed = m.primedV6
+					}
+					if !primed {
+						log.WithFields(m.logFields(v6)).Debug("udhcpc startup deconfig — ignoring (not yet primed)")
+						continue
+					}
+
+					// Soft handover after we've been primed: don't delete the
+					// IP yet (would drop routes copied from the host bridge).
+					// Mark deconfigured so the next bound/renew does AddrReplace.
 					log.
 						WithFields(m.logFields(v6)).
 						Info("udhcpc deconfig — deferring IP removal until next lease (soft handover)")
@@ -206,10 +224,15 @@ func (m *dhcpManager) setupClient(v6 bool) (chan error, error) {
 						m.deconfigured = true
 					}
 				case "bound":
-					// "bound" can fire on initial lease (already handled in CreateEndpoint)
-					// or after a deconfig/lease loss. In the latter case, treat it like
-					// a renew so the IP is replaced and the deconfigured flag clears.
+					// "bound" fires on the first lease (after CreateEndpoint already
+					// set the IP) or after a deconfig/lease loss. Mark primed so
+					// future deconfigs are taken seriously, then treat it as renew.
 					log.WithFields(m.logFields(v6)).Debug("udhcpc bound")
+					if v6 {
+						m.primedV6 = true
+					} else {
+						m.primed = true
+					}
 					if err := m.renew(v6, event.Data); err != nil {
 						log.
 							WithError(err).
@@ -222,6 +245,11 @@ func (m *dhcpManager) setupClient(v6 bool) (chan error, error) {
 					log.
 						WithFields(m.logFields(v6)).
 						Debug("udhcpc renew")
+					if v6 {
+						m.primedV6 = true
+					} else {
+						m.primed = true
+					}
 
 					if err := m.renew(v6, event.Data); err != nil {
 						log.
