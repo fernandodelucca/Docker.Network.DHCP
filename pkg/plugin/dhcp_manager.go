@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	dNetwork "github.com/docker/docker/api/types/network"
@@ -49,9 +50,11 @@ type dhcpManager struct {
 	deconfigured   bool
 	deconfiguredV6 bool
 
-	stopChan  chan struct{}
-	errChan   chan error
-	errChanV6 chan error
+	stopChan   chan struct{}
+	stopOnce   sync.Once
+	started    bool
+	errChan    chan error
+	errChanV6  chan error
 }
 
 func newDHCPManager(docker *docker.Client, r JoinRequest, opts DHCPNetworkOptions) *dhcpManager {
@@ -71,6 +74,10 @@ func (m *dhcpManager) logFields(v6 bool) log.Fields {
 		"sandbox":  m.joinReq.SandboxKey,
 		"is_ipv6":  v6,
 	}
+}
+
+func (m *dhcpManager) closeStopChan() {
+	m.stopOnce.Do(func() { close(m.stopChan) })
 }
 
 func (m *dhcpManager) renew(v6 bool, info udhcpc.Info) error {
@@ -111,6 +118,18 @@ func (m *dhcpManager) renew(v6 bool, info udhcpc.Info) error {
 				Debug("failed to delete previous IP (best-effort)")
 		}
 		if err := m.netHandle.AddrAdd(m.ctrLink, ip); err != nil {
+			log.
+				WithError(err).
+				WithFields(m.logFields(v6)).
+				WithField("new_ip", ip).
+				Error("failed to add new IP — attempting to restore previous")
+			if rerr := m.netHandle.AddrAdd(m.ctrLink, lastIP); rerr != nil {
+				log.
+					WithError(rerr).
+					WithFields(m.logFields(v6)).
+					WithField("ip", lastIP).
+					Error("failed to restore previous IP — container has no IP address")
+			}
 			return fmt.Errorf("failed to add IP address: %w", err)
 		}
 
@@ -187,11 +206,16 @@ func (m *dhcpManager) setupClient(v6 bool) (chan error, error) {
 		return nil, fmt.Errorf("failed to start DHCP%v client: %w", v6Str, err)
 	}
 
-	errChan := make(chan error)
+	errChan := make(chan error, 1)
 	go func() {
 		for {
 			select {
-			case event := <-events:
+			case event, ok := <-events:
+				if !ok {
+					log.WithFields(m.logFields(v6)).Error("udhcpc process exited unexpectedly — DHCP renewal lost")
+					errChan <- fmt.Errorf("udhcpc%s process exited unexpectedly", map[bool]string{true: "6"}[v6])
+					return
+				}
 				switch event.Type {
 				case "deconfig":
 					// udhcpc always emits deconfig once at startup (before
@@ -378,15 +402,16 @@ func (m *dhcpManager) Start(ctx context.Context) error {
 func (m *dhcpManager) startClients() error {
 	var err error
 	if m.errChan, err = m.setupClient(false); err != nil {
-		close(m.stopChan)
+		m.closeStopChan()
 		return err
 	}
 	if m.opts.IPv6 {
 		if m.errChanV6, err = m.setupClient(true); err != nil {
-			close(m.stopChan)
+			m.closeStopChan()
 			return err
 		}
 	}
+	m.started = true
 	return nil
 }
 
@@ -405,10 +430,14 @@ func (m *dhcpManager) RestoreClient(ctx context.Context) error {
 }
 
 func (m *dhcpManager) Stop() error {
+	if !m.started {
+		return nil
+	}
+
 	defer m.nsHandle.Close()
 	defer m.netHandle.Delete()
 
-	close(m.stopChan)
+	m.closeStopChan()
 
 	if err := <-m.errChan; err != nil {
 		return fmt.Errorf("failed shut down DHCP client: %w", err)

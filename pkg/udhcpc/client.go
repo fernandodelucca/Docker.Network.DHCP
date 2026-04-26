@@ -136,6 +136,7 @@ func (c *DHCPClient) Start() (chan Event, error) {
 
 	events := make(chan Event)
 	go func() {
+		defer close(events)
 		scanner := bufio.NewScanner(c.eventPipe)
 		for scanner.Scan() {
 			log.WithField("line", string(scanner.Bytes())).Trace("udhcpc handler line")
